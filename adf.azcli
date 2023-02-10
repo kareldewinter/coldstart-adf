@@ -1,0 +1,135 @@
+############################################################################
+# Created by Karel De Winter
+# Januari 2023
+#
+# Azure Data Factory demo script
+#
+############################################################################
+
+# Variables
+
+create_adf=yes
+private_link=no
+aad_auth=no
+
+unique_id=$RANDOM
+
+rg=rg-cs-adf-${unique_id}
+location=eastus2
+
+factory_name=myadf${unique_id}
+
+logws_name=log${unique_id}
+storage_account_name=storage${unique_id}
+
+
+container_name=adfstorage${unique_id}
+blob_path='coldstart-orders-historical.csv'
+
+# Resource group
+az group create -n $rg -l $location
+
+
+# [Optional] Create Log analytics workspace
+az monitor log-analytics workspace create -n $logws_name -g $rg
+logws_id=$(az resource list -g $rg -n $logws_name --query '[].id' -o tsv)
+logws_customerid=$(az monitor log-analytics workspace show -n $logws_name -g $rg --query customerId -o tsv)
+
+
+# Create Storage Account
+az storage account create -n $storage_account_name -g $rg --sku Standard_LRS --kind StorageV2
+az storage container create -n $container_name --account-name $storage_account_name --auth-mode login
+storage_account_key=$(az storage account keys list -n $storage_account_name -g $rg --query '[0].value' -o tsv)
+
+# Upload a new file
+
+# az storage blob upload --account-name $storage_account_name --name input/emp.txt --container-name $container_name --file emp.txt --auth-mode key
+
+# Create a SAS and download blob to test it
+# Calculate dates, get storage key, generate SAS
+expiry=`date -u -d "30 minutes" '+%Y-%m-%dT%H:%MZ'`
+key=$(az storage account keys list -n $storage_account_name --query '[0].value' -o tsv)
+sas=$(az storage container generate-sas --account-name $storage_account_name --account-key $key -n $container_name --https-only --permissions r --expiry=$expiry -o tsv)
+
+# Retrieve blob URL and download blob
+# az storage blob show -n $blob_path -c $container_name --account-name $storage_account_name --account-key $key
+blob_url=$(az storage blob url -n $blob_path -c $container_name --account-name $storage_account_name --account-key $key -o tsv)
+url=${blob_url}?${sas}
+echo "Downloading from ${url}..."
+wget $url -O /tmp/workspace.json
+
+
+
+# Azure SQL
+
+sql_server_name=myserver${unique_id}
+sql_db_name=mydb
+sql_username=azure
+sql_password=Microsoft123!
+az sql server create -n $sql_server_name -g $rg -l $location --admin-user $sql_username --admin-password $sql_password
+az sql server firewall-rule create -g $rg --name AllowSome --server $sql_server_name --start-ip-address 91.178.52.13 --end-ip-address 91.178.52.13
+az sql db create -n $sql_db_name -s $sql_server_name -g $rg -e Basic -c 5 --no-wait
+# Optionally test for serverless SKU
+az sql db update -g $rg -s $sql_server_name -n $sql_db_name --edition GeneralPurpose --min-capacity 1 --capacity 4 --family Gen5 --compute-model Serverless --auto-pause-delay 1440
+sql_server_fqdn=$(az sql server show -n $sql_server_name -g $rg -o tsv --query fullyQualifiedDomainName)
+
+# Create the Table IceCreams
+#CREATE TABLE dbo.Icecreams (
+#	[Id] int primary key clustered,
+#	[Name] nvarchar(255) not null,
+#	[Description] nvarchar(2000) not null,
+#	[ImageUrl] nvarchar(2000) not null
+#)
+
+# Create the Table Drivers
+#CREATE TABLE dbo.Drivers (
+#	[Id] int primary key clustered,
+#	[Name] nvarchar(255) not null,
+#	[ImageUrl] nvarchar(2000) DEFAULT 'https://coldstartsa.blob.core.windows.net/web/assets/Driver1.png'
+#)
+
+# Create the Table Orders
+#CREATE TABLE dbo.Orders (
+#	Id UNIQUEIDENTIFIER
+#        CONSTRAINT Guid_Default DEFAULT
+#        NEWSEQUENTIALID() ROWGUIDCOL,
+#	[User] nvarchar(255) not null,
+#	[Date] datetime not null DEFAULT (GETDATE()),
+#	[IcecreamId] int not null REFERENCES Icecreams(Id),
+#	[Status] nvarchar(100) not null DEFAULT 'New',
+#	[DriverId] int null REFERENCES Drivers(Id),
+#	[FullAddress] nvarchar(2000),
+#	[LastPosition] nvarchar(500)
+#	
+#	CONSTRAINT Guid_PK PRIMARY KEY (Id)
+#)
+
+
+# Populate the database
+#INSERT INTO [dbo].[Icecreams] 
+#([Id], [Name], [Description], [ImageUrl]) 
+#VALUES
+#(1, 'Color Pop', 'Delicious 4-color popsicle, plenty of vitamins.', 'https://coldstartsa.blob.core.windows.net/web/assets/Icecream1.png')
+
+
+
+# Azure Data Factory
+# az extension add --name datafactory
+az datafactory create -g $rg -l $location --factory-name $factory_name
+
+# Automate the import process from CSV into the SQL Database.
+# Upload CSV file to storage account
+# Check CSV file coldstart-orders-historical.csv
+
+
+###############
+#   Cleanup   #
+###############
+
+# Delete selective components
+az container delete -n ${app_name}-${location1} -g $rg -y
+az container delete -n ${app_name}-${location2} -g $rg -y
+az datafactory delete -n $factory_name -g $rg -y
+
+# Delete everything
+az group delete -n $rg -y --no-wait
